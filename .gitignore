@@ -1,0 +1,12 @@
+*
+!/.gitignore
+!/app.py
+!/production.py
+!/wsgi.py
+!/requirements.txt
+!/requirements-test.txt
+!/render.yaml
+!/README.md
+!/tests/
+/tests/*
+!/tests/test_render.py
