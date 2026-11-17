@@ -3,6 +3,8 @@
 !/app.py
 !/production.py
 !/wsgi.py
+!/start_render.py
+!/startup_check.py
 !/requirements.txt
 !/requirements-test.txt
 !/render.yaml
@@ -10,3 +12,4 @@
 !/tests/
 /tests/*
 !/tests/test_render.py
+!/tests/test_startup_check.py

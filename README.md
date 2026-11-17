@@ -78,7 +78,7 @@ También puede revisarse `render.yaml` como Blueprint antes de aplicarlo;
 crearlo/aplicarlo desplegaría un endpoint público.
 
 - Build: `pip install -r requirements.txt`
-- Start: `gunicorn --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 30 --access-logfile /dev/null --error-logfile - wsgi:app`
+- Start: `python start_render.py`
 - Health check: `/health`
 
 Variables en el panel:
@@ -88,6 +88,11 @@ Variables en el panel:
 - `IP_PER_HOUR=10`, `GLOBAL_PER_DAY=100`, `MAX_CONCURRENT=2`.
 - `GROQ_MODEL`: opcional; el backend tiene un valor predeterminado.
 - `PORT`: asignado por Render; no configurarlo manualmente.
+- `UPSTASH_STARTUP_CHECK`: opcional, `false` por defecto. Solo con
+  `GROQ_ENABLED=false`, poner temporalmente `true` para probar TLS, PING y
+  Lua aislado al arrancar. Comprobar en logs `UPSTASH_CHECK TLS_PING OK` y
+  `UPSTASH_CHECK LUA_CONCURRENCIA_TTL OK`; un fallo no impide `/health`.
+  Volver a `false` tras la prueba: si no, se repetirá en cada reinicio.
 
 Render puede dormir tras 15 minutos de inactividad y tardar alrededor de un
 minuto en despertar. No crear cron ni pings para impedir el reposo. El plan
