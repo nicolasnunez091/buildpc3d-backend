@@ -1,6 +1,4 @@
 """API WSGI pública, sin autenticación; no carga archivos .env."""
-import hashlib
-import ipaddress
 import json
 import logging
 import os
@@ -13,7 +11,6 @@ from redis.backoff import NoBackoff
 from redis.exceptions import RedisError
 from redis.retry import Retry
 from werkzeug.exceptions import RequestEntityTooLarge
-from werkzeug.middleware.proxy_fix import ProxyFix
 
 from app import ClassificationError, classify
 
@@ -28,8 +25,8 @@ redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', now)
 if tonumber(redis.call('GET', KEYS[1]) or '0') >= tonumber(ARGV[1]) then return 0 end
 if tonumber(redis.call('GET', daily_key) or '0') >= tonumber(ARGV[2]) then return 0 end
 if redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[3]) then return 0 end
-local ip_count = redis.call('INCR', KEYS[1])
-if ip_count == 1 then redis.call('EXPIRE', KEYS[1], 3600) end
+local hour_count = redis.call('INCR', KEYS[1])
+if hour_count == 1 then redis.call('EXPIRE', KEYS[1], 3600) end
 local global_count = redis.call('INCR', daily_key)
 if global_count == 1 then redis.call('EXPIRE', daily_key, 86400 - (now % 86400)) end
 redis.call('ZADD', KEYS[2], now + tonumber(ARGV[4]), ARGV[5])
@@ -56,17 +53,16 @@ def _enabled_env():
 class Quotas:
     def __init__(self, redis_client):
         self.client = redis_client
-        self.ip_hour = _positive_env("IP_PER_HOUR", 10)
-        self.daily = _positive_env("GLOBAL_PER_DAY", 100)
-        self.concurrent = _positive_env("MAX_CONCURRENT", 2)
+        self.hourly = _positive_env("GLOBAL_PER_HOUR", 10)
+        self.daily = _positive_env("GLOBAL_PER_DAY", 50)
+        self.concurrent = _positive_env("MAX_CONCURRENT", 1)
         # Recupera reservas huérfanas; no es un plazo total de la llamada.
         self.lease_seconds = 120
 
-    def reserve(self, ip, lease):
-        ip_hash = hashlib.sha256(ip.encode("utf-8")).hexdigest()
+    def reserve(self, lease):
         return self.client.eval(
-            _RESERVE_SCRIPT, 2, "bpc:public:ip:" + ip_hash, "bpc:public:active",
-            self.ip_hour, self.daily, self.concurrent, self.lease_seconds, lease,
+            _RESERVE_SCRIPT, 2, "bpc:global:hour", "bpc:public:active",
+            self.hourly, self.daily, self.concurrent, self.lease_seconds, lease,
         ) == 1
 
     def release(self, lease):
@@ -106,9 +102,6 @@ def create_app(quotas=None):
 
     app = Flask(__name__, static_folder=None)
     app.config["MAX_CONTENT_LENGTH"] = 8192
-    # Hipótesis para Render: un salto de proxy. Debe verificarse antes de
-    # habilitar la IA, incluyendo cabeceras falsificadas y acceso interno.
-    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
 
     def error(code, text):
         return jsonify(error=text), code
@@ -130,12 +123,6 @@ def create_app(quotas=None):
     def interpret():
         if not enabled:
             return error(503, "Servicio temporalmente desactivado")
-        if not request.headers.get("X-Forwarded-For", "").strip():
-            return error(503, "Origen no disponible")
-        try:
-            ip = str(ipaddress.ip_address(request.remote_addr or ""))
-        except ValueError:
-            return error(400, "Origen no válido")
         if request.mimetype != "application/json":
             return error(415, "Se requiere JSON")
         try:
@@ -154,7 +141,7 @@ def create_app(quotas=None):
             return error(400, "Solicitud no válida")
         lease = secrets.token_hex(16)
         try:
-            if not quotas.reserve(ip, lease):
+            if not quotas.reserve(lease):
                 return error(429, "Límite de solicitudes")
         except RedisError:
             LOGGER.warning("Cuotas no disponibles")

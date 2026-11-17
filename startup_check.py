@@ -18,15 +18,15 @@ def _report(label, ok):
 def check_redis(client):
     """Ensayo Lua aislado. Las claves restantes caducan, sin borrar datos."""
     old_prefix = "bpc:public:day:"
-    old_ip_ttl = "redis.call('EXPIRE', KEYS[1], 3600)"
+    old_hour_ttl = "redis.call('EXPIRE', KEYS[1], 3600)"
     old_daily_ttl = "86400 - (now % 86400)"
     if not (_RESERVE_SCRIPT.count(old_prefix) == 1
-            and _RESERVE_SCRIPT.count(old_ip_ttl) == 1
+            and _RESERVE_SCRIPT.count(old_hour_ttl) == 1
             and _RESERVE_SCRIPT.count(old_daily_ttl) == 1):
         raise ValueError("unsupported script")
     prefix = "bpc:diagnostico:" + secrets.token_hex(16) + ":"
     script = (_RESERVE_SCRIPT.replace(old_prefix, prefix + "day:")
-              .replace(old_ip_ttl, "redis.call('EXPIRE', KEYS[1], 300)")
+              .replace(old_hour_ttl, "redis.call('EXPIRE', KEYS[1], 300)")
               .replace(old_daily_ttl, "math.min(300, 86400 - (now % 86400))"))
     active = prefix + "active"
     if client.ping() is not True:
@@ -34,7 +34,7 @@ def check_redis(client):
     _report("TLS_PING", True)
 
     def reserve(i):
-        return client.eval(script, 2, prefix + "ip:" + str(i), active,
+        return client.eval(script, 2, prefix + "hour", active,
                            10, 100, 2, 120, "lease-" + str(i))
 
     # Las dos reservas admitidas se mantienen hasta finalizar las 8 llamadas.
@@ -46,8 +46,7 @@ def check_redis(client):
         if result == 1:
             client.eval(_RELEASE_SCRIPT, 1, active, "lease-" + str(index))
     # Comprobar TTL de una clave escrita por el script (ningún valor privado).
-    accepted = results.index(1)
-    ttl = client.ttl(prefix + "ip:" + str(accepted))
+    ttl = client.ttl(prefix + "hour")
     if not 0 < ttl <= 300:
         raise ValueError("ttl")
     _report("LUA_CONCURRENCIA_TTL", True)

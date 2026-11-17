@@ -11,9 +11,9 @@ services:
         value: 3.12.8
       - key: GROQ_ENABLED
         value: "false"
-      - key: IP_PER_HOUR
+      - key: GLOBAL_PER_HOUR
         value: "10"
       - key: GLOBAL_PER_DAY
-        value: "100"
+        value: "50"
       - key: MAX_CONCURRENT
-        value: "2"
+        value: "1"

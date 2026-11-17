@@ -1,6 +1,7 @@
 import concurrent.futures
 import http.client
 import os
+import subprocess
 import sys
 import threading
 import unittest
@@ -12,6 +13,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import fakeredis
 from redis.exceptions import ConnectionError as RedisConnectionError
 from production import Quotas, create_app
+
+SYSTEM_ENV = {key: os.environ[key] for key in ("SYSTEMROOT", "WINDIR", "PATH", "TEMP", "TMP") if key in os.environ}
 
 
 class ProductionTests(unittest.TestCase):
@@ -63,10 +66,9 @@ class ProductionTests(unittest.TestCase):
             thread.join(timeout=3)
             server.server_close()
 
-    def test_no_forwarded_ip_fails_closed(self):
-        with patch("production.classify") as classifier:
-            self.assertEqual(self.post(headers={}).status_code, 503)
-            classifier.assert_not_called()
+    def test_no_forwarded_ip_required(self):
+        with patch("production.classify", return_value={"uso": "edicion"}):
+            self.assertEqual(self.post(headers={}).status_code, 200)
 
     def test_tls_only_and_cannot_override_validation(self):
         for url in ("redis://localhost:6379", "rediss://localhost:6379?ssl_cert_reqs=none"):
@@ -109,13 +111,14 @@ class ProductionTests(unittest.TestCase):
             # Surrogates must not reach the classifier either.
             classifier.assert_not_called()
 
-    def test_ip_hour_limit_and_separate_ip(self):
+    def test_global_hour_limit_cannot_be_evaded_by_headers(self):
         with patch("production.classify", return_value={"uso": "edicion"}) as classifier:
             for _ in range(10):
                 self.assertEqual(self.post().status_code, 200)
             self.assertEqual(self.post().status_code, 429)
-            self.assertEqual(self.post(headers={"X-Forwarded-For": "198.51.100.9"}).status_code, 200)
-            self.assertEqual(classifier.call_count, 11)
+            self.assertEqual(self.post(headers={"X-Forwarded-For": "198.51.100.9"}).status_code, 429)
+            self.assertEqual(self.post(headers={"CF-Connecting-IP": "203.0.113.1"}).status_code, 429)
+            self.assertEqual(classifier.call_count, 10)
 
     def test_global_limit_across_ips(self):
         with patch.dict(os.environ, {"GLOBAL_PER_DAY": "3"}):
@@ -127,7 +130,7 @@ class ProductionTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 200 if i < 3 else 429)
             self.assertEqual(classifier.call_count, 3)
 
-    def test_simultaneous_ip_quota_is_atomic(self):
+    def test_simultaneous_hour_quota_is_atomic(self):
         with patch.dict(os.environ, {"MAX_CONCURRENT": "30"}):
             app = create_app(quotas=Quotas(self.redis))
         barrier = threading.Barrier(20)
@@ -140,14 +143,42 @@ class ProductionTests(unittest.TestCase):
         self.assertEqual(results.count(200), 10)
         self.assertEqual(results.count(429), 10)
 
-    def test_default_global_100_per_day(self):
+    def test_quota_shared_between_processes_with_fake_redis_server(self):
+        server = fakeredis.TcpFakeServer(("127.0.0.1", 0), server_type="redis")
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        program = (
+            "import os,sys,secrets;from redis import Redis;from production import Quotas;"
+            "q=Quotas(Redis(host='127.0.0.1',port=int(sys.argv[1])));"
+            "lease=secrets.token_hex(16);ok=q.reserve(lease);"
+            "q.release(lease) if ok else None;print(int(ok))"
+        )
+        try:
+            def run(_):
+                child = subprocess.run([sys.executable, "-c", program, str(server.server_address[1])],
+                    cwd=str(Path(__file__).resolve().parents[1]), capture_output=True, text=True, timeout=30,
+                    env={**SYSTEM_ENV, **os.environ, "PYTHONPATH": os.pathsep.join(sys.path)})
+                self.assertEqual(child.returncode, 0, child.stderr)
+                return child.stdout.strip()
+            with patch.dict(os.environ, {"MAX_CONCURRENT": "30"}):
+                with concurrent.futures.ThreadPoolExecutor(max_workers=12) as pool:
+                    results = list(pool.map(run, range(12)))
+            self.assertEqual(results.count("1"), 10)
+            self.assertEqual(results.count("0"), 2)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+    def test_default_global_50_per_day(self):
+        self.quotas.hourly = 100
         with patch("production.classify", return_value={"uso": "juegos"}):
-            for i in range(101):
+            for i in range(51):
                 result = self.post(headers={"X-Forwarded-For": f"198.51.100.{i+1}"})
-                self.assertEqual(result.status_code, 200 if i < 100 else 429)
+                self.assertEqual(result.status_code, 200 if i < 50 else 429)
 
     def test_atomic_simultaneous_limit(self):
-        started = threading.Barrier(3)
+        started = threading.Barrier(2)
         finish = threading.Event()
         def classify_wait(_):
             started.wait(timeout=5)
@@ -158,23 +189,22 @@ class ProductionTests(unittest.TestCase):
             return self.post(client=self.app.test_client(),
                 headers={"X-Forwarded-For": ip}).status_code
         with patch("production.classify", side_effect=classify_wait):
-            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
                 one = pool.submit(call, "198.51.100.1")
-                two = pool.submit(call, "198.51.100.2")
                 try:
                     started.wait(timeout=5)
-                    self.assertEqual(call("198.51.100.3"), 429)
+                    self.assertEqual(call("198.51.100.2"), 429)
                 finally:
                     finish.set()
-                self.assertEqual([one.result(), two.result()], [200, 200])
+                self.assertEqual(one.result(), 200)
         self.assertEqual(self.redis.zcard("bpc:public:active"), 0)
 
     def test_orphaned_reservation_expires_and_denial_does_not_charge(self):
         self.quotas.concurrent = 1
-        self.assertTrue(self.quotas.reserve("127.0.0.1", "first"))
-        self.assertFalse(self.quotas.reserve("127.0.0.2", "denied"))
+        self.assertTrue(self.quotas.reserve("first"))
+        self.assertFalse(self.quotas.reserve("denied"))
         self.redis.zadd("bpc:public:active", {"first": 1})
-        self.assertTrue(self.quotas.reserve("127.0.0.2", "second"))
+        self.assertTrue(self.quotas.reserve("second"))
         self.quotas.release("second")
 
     def test_redis_failure_and_release_failure(self):
@@ -195,10 +225,11 @@ class ProductionTests(unittest.TestCase):
         self.assertNotIn("PRIVATE_REQUEST", str(logs.output))
         self.assertEqual(self.redis.zcard("bpc:public:active"), 0)
 
-    def test_proxy_fix_uses_nearest_value(self):
+    def test_headers_do_not_reach_quota(self):
         with patch.object(self.quotas, "reserve", return_value=False) as reserve:
             self.post(headers={"X-Forwarded-For": "192.0.2.3, 198.51.100.2"})
-        self.assertEqual(reserve.call_args.args[0], "198.51.100.2")
+        self.assertEqual(len(reserve.call_args.args), 1)
+        self.assertNotIn("198.51.100.2", reserve.call_args.args[0])
 
 
 if __name__ == "__main__":

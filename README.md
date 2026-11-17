@@ -11,16 +11,13 @@ de afirmar que la URL no está expuesta. `GROQ_ENABLED=false` impide llamadas
 a Groq mientras se comprueban los controles. `/health` es público y solo
 indica que el proceso responde; no prueba Redis ni Groq.
 
-`ProxyFix(x_for=1)` usa el último valor `X-Forwarded-For`; el puerto de Render
-no es directamente accesible desde Internet según su documentación, pero
-otros servicios de la red privada pueden alcanzarlo. **No se ha demostrado**
-qué cabecera establece Render ni si se puede falsificar por todas las rutas.
-Antes de activar Groq, verificar con Render y con pruebas controladas desde
-distintas redes, cabeceras falsificadas y red privada; restringir acceso interno
-o mantener `GROQ_ENABLED=false` si no puede garantizarse. Sin Nginx no hay sus
-límites adicionales; cuotas IP no son defensa completa contra bots o IPv6.
+No se utiliza `X-Forwarded-For`, ninguna IP ni identificador del cliente para
+las cuotas. Todos los clientes comparten las mismas reservas Redis.
 
-Cuotas Redis: 10/IP por hora, 100/día UTC, 2 concurrentes, configurables.
+Cuotas Redis: 10/hora, 50/día UTC, 1 concurrente, configurables. La ventana
+horaria empieza con la primera solicitud aceptada y dura 3600 segundos. La
+diaria reinicia a medianoche UTC. Un tercero puede agotar el cupo compartido y
+dejar a todos sin IA temporalmente; no es protección absoluta frente a abuso.
 Se reservan antes de llamar a Groq; Redis inalcanzable devuelve 503 y cuotas
 excedidas 429. Se usa `rediss://` con certificado y hostname verificados,
 sin parámetros de URL capaces de deshabilitar TLS y sin reintentos de Redis.
@@ -85,7 +82,7 @@ Variables en el panel:
 
 - `GROQ_ENABLED=false` (después cambiar solo al aprobar seguridad).
 - `GROQ_API_KEY` y `REDIS_URL`: secretos privados, sin valores en Git.
-- `IP_PER_HOUR=10`, `GLOBAL_PER_DAY=100`, `MAX_CONCURRENT=2`.
+- `GLOBAL_PER_HOUR=10`, `GLOBAL_PER_DAY=50`, `MAX_CONCURRENT=1`.
 - `GROQ_MODEL`: opcional; el backend tiene un valor predeterminado.
 - `PORT`: asignado por Render; no configurarlo manualmente.
 - `UPSTASH_STARTUP_CHECK`: opcional, `false` por defecto. Solo con
@@ -119,8 +116,8 @@ Esta modificación de Godot **no se ha implementado**.
 
 Probar en un entorno limitado, sin habilitar IA públicamente: certificado TLS
 real y nombre de host Upstash; Lua `EVAL`/`TIME`, clave dinámica y concurrencia
-entre procesos; caída y resultados inciertos de Redis; IP confiable y spoofing
-por todas las rutas; suspensión de Render y despertar; protección frente a
+entre procesos; caída y resultados inciertos de Redis; suspensión de Render y
+despertar; protección frente a
 abuso, costes y registros. Para usar Groq se requiere una prueba autorizada y
 una decisión expresa de activar la variable. Las pruebas locales usan
 fakeredis y no sustituyen esas comprobaciones.
@@ -128,4 +125,9 @@ fakeredis y no sustituyen esas comprobaciones.
 Fuentes: https://render.com/docs/free,
 https://render.com/docs/web-services,
 https://upstash.com/docs/redis/commands/scripting/eval,
-https://upstash.com/pricing/redis.
+https://upstash.com/pricing/redis,
+https://console.groq.com/docs/billing-faqs y
+https://console.groq.com/docs/rate-limits. Groq ofrece un plan Free sujeto
+a límites; verificar el plan de la organización y no pasarse a Developer,
+que requiere método de pago y cobra por uso. Los límites de llamadas no son
+garantía de gasto cero en un plan pagado.
